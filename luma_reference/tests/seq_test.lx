@@ -7,34 +7,10 @@
 @use "tape"  as tape
 @use "viz"   as viz
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SEQUENTIAL MEMORY TEST
-//
-// The network is shown a sequence of N values one at a time.
-// At each step it receives the current value as input and must output
-// the value it saw ONE STEP AGO.
-//
-// Example (seq_len = 4):
-//   Step 0  in=0.8  target=0.0  (no previous value — target is 0)
-//   Step 1  in=0.2  target=0.8
-//   Step 2  in=0.9  target=0.2
-//   Step 3  in=0.5  target=0.9
-//
-// A plain MLP with no memory cannot solve this — it would need to remember
-// the previous input across forward passes. The tape + state give the network
-// exactly the memory it needs to do so.
-//
-// Training: the tape and state are NOT reset between steps within a sequence.
-// They ARE reset between sequences so each episode starts clean.
-// Backprop is run at every step (online, not BPTT).
-// ─────────────────────────────────────────────────────────────────────────────
+const SEQ_LEN:    int = 25;
+const NUM_SEQS:   int = 50;
+const INPUT_SIZE: int = 10;
 
-const SEQ_LEN:    int = 6;
-const NUM_SEQS:   int = 8;
-const INPUT_SIZE: int = 1;
-
-// Fill seqs[NUM_SEQS][SEQ_LEN] with values in (0,1).
-// keep away from 0 and 1 so sigmoid outputs have room to be right.
 const gen_sequences -> fn (seqs: *double) void {
     let n: int = NUM_SEQS * SEQ_LEN;
     loop [i: int = 0](i < n) : (++i) {
@@ -44,6 +20,7 @@ const gen_sequences -> fn (seqs: *double) void {
 
 const eval_seq_loss -> fn (
     head:        *TapeLayer,
+    hidden_2:    *TapeLayer,
     output_tl:   *TapeLayer,
     seq:         *double
 ) double {
@@ -65,17 +42,20 @@ const eval_seq_loss -> fn (
     }
 
     head.reset();
+    hidden_2.reset();
     output_tl.reset();
     return total / cast<double>(SEQ_LEN);
 }
 
 const show_seq_step -> fn (
     hidden:    *TapeLayer,
+    hidden_2:  *TapeLayer,
     output_tl: *TapeLayer,
     h_trail:   *HeadTrail,
+    h2_trail:  *HeadTrail,
     o_trail:   *HeadTrail,
     step:      int,
-    val:     double,
+    val:       double,
     target:    double,
     pred:      double,
     epoch:     int,
@@ -83,7 +63,7 @@ const show_seq_step -> fn (
     loss:      double,
     prev_loss: double
 ) void {
-     output("\x1b[2J\x1b[H");
+    output("\x1b[2J\x1b[H");
 
     output(viz::BOLD);
     output("╔══════════════════════════════════════════╗\n");
@@ -96,7 +76,6 @@ const show_seq_step -> fn (
     viz::show_loss(loss, prev_loss);
     output("\n");
 
-    // Step counter bar
     output("  Step ");
     output(step + 1);
     output(" / ");
@@ -112,8 +91,12 @@ const show_seq_step -> fn (
     output(viz::RESET);
     output("\n\n");
 
-    viz::show_tape_grid(&hidden.tape,    h_trail, "Hidden Tape ");
+    viz::show_tape_grid(&hidden.tape,   h_trail,  "Hidden 1    ");
     viz::show_state(hidden.state, hidden.state_dim);
+    output("\n");
+
+    viz::show_tape_grid(&hidden_2.tape, h2_trail, "Hidden 2    ");
+    viz::show_state(hidden_2.state, hidden_2.state_dim);
     output("\n");
 
     viz::show_tape_grid(&output_tl.tape, o_trail, "Output Tape ");
@@ -123,20 +106,20 @@ const show_seq_step -> fn (
 
 const print_recall_table -> fn (
     head:      *TapeLayer,
+    hidden_2:  *TapeLayer,
     output_tl: *TapeLayer,
     seqs:      *double,
     n_seqs:    int
 ) void {
-    output("\n  Recall Table (last ", n_seqs, " sequences):\n");
+    output("\n  Recall Table (", n_seqs, " sequences):\n");
     output("╔════════╦");
     loop [s: int = 0](s < SEQ_LEN) : (++s) { output("══════════╦"); }
     output("═══════╗\n");
 
     output("║  seq   ║");
-    loop [s: int = 0](s < SEQ_LEN) : (++s) {
-        output("  step ", s, "  ║");
-    }
+    loop [s: int = 0](s < SEQ_LEN) : (++s) { output("  step ", s, "  ║"); }
     output(" pass? ║\n");
+
     output("╠════════╬");
     loop [s: int = 0](s < SEQ_LEN) : (++s) { output("══════════╬"); }
     output("═══════╣\n");
@@ -158,7 +141,6 @@ const print_recall_table -> fn (
             tape::run_tape_backward(output_tl, &t[0]);
             tape::run_tape_update(head, 0.0);
 
-            // For step 0 we don't score (target is 0 by convention, not meaningful)
             if (step == 0) {
                 output("   --     ║");
             } else {
@@ -182,6 +164,7 @@ const print_recall_table -> fn (
         output("║\n");
 
         head.reset();
+        hidden_2.reset();
         output_tl.reset();
     }
 
@@ -191,23 +174,29 @@ const print_recall_table -> fn (
 }
 
 pub const test_seq_memory -> fn () void {
-    let hidden_size: int    = 16;
+    let hidden_size: int    = 25;
     let state_dim:   int    = 4;
     let tape_width:  int    = 8;
-    let epochs:      int    = 800;
-    let lr:          double = 5.0;
+    let epochs:      int    = 80000;
+    let lr:          double = 0.5;
 
-    let hidden:    TapeLayer = tape::init_tape_layer(INPUT_SIZE, hidden_size, state_dim, tape_width);
-    let output_tl: TapeLayer = tape::init_tape_layer(hidden_size, 1,          state_dim, tape_width);
+    let hidden:    TapeLayer = tape::init_tape_layer(INPUT_SIZE,   hidden_size, state_dim, tape_width);
+    let hidden_2:  TapeLayer = tape::init_tape_layer(hidden_size,  hidden_size, state_dim, tape_width);
+    let output_tl: TapeLayer = tape::init_tape_layer(hidden_size,  1,           state_dim, tape_width);
 
     defer {
         tape::free_tape_layer(&hidden);
+        tape::free_tape_layer(&hidden_2);
         tape::free_tape_layer(&output_tl);
     }
-    
+
     hidden.layer.init_weights_biases();
+    hidden_2.layer.init_weights_biases();
     output_tl.layer.init_weights_biases();
-    hidden.next_tape = &output_tl;
+
+    hidden.next_tape   = &hidden_2;
+    hidden_2.next_tape = &output_tl;
+
     tape::link_tape_layers(&hidden);
 
     let seqs: *double = cast<*double>(alloc(NUM_SEQS * SEQ_LEN * sizeof<double>));
@@ -215,15 +204,16 @@ pub const test_seq_memory -> fn () void {
     defer { free(seqs); }
 
     let h_trail:   HeadTrail = viz::init_trail();
+    let h2_trail:  HeadTrail = viz::init_trail();
     let o_trail:   HeadTrail = viz::init_trail();
     let prev_loss: double    = -1.0;
 
- loop [epoch: int = 0](epoch < epochs) : (++epoch) {
+    loop [epoch: int = 0](epoch < epochs) : (++epoch) {
         loop [q: int = 0](q < NUM_SEQS) : (++q) {
             let seq: *double = &seqs[q * SEQ_LEN];
 
             loop [step: int = 0](step < SEQ_LEN) : (++step) {
-                let val:  double = seq[step];
+                let val:    double = seq[step];
                 let target: double = 0.0;
                 if (step > 0) target = seq[step - 1];
 
@@ -233,16 +223,18 @@ pub const test_seq_memory -> fn () void {
                 tape::run_tape_update(&hidden, lr);
 
                 h_trail.push(hidden.tape.head_x,    hidden.tape.head_y);
+                h2_trail.push(hidden_2.tape.head_x, hidden_2.tape.head_y);
                 o_trail.push(output_tl.tape.head_x, output_tl.tape.head_y);
             }
 
             hidden.reset();
+            hidden_2.reset();
             output_tl.reset();
         }
 
         if (epoch % 500 == 0) {
             let seq: *double = &seqs[0];
-            let loss: double = eval_seq_loss(&hidden, &output_tl, seq);
+            let loss: double = eval_seq_loss(&hidden, &hidden_2, &output_tl, seq);
 
             loop [step: int = 0](step < SEQ_LEN) : (++step) {
                 let val:    double = seq[step];
@@ -256,11 +248,12 @@ pub const test_seq_memory -> fn () void {
                 let pred: double  = act[0];
 
                 show_seq_step(
-                    &hidden, &output_tl, &h_trail, &o_trail,
+                    &hidden, &hidden_2, &output_tl,
+                    &h_trail, &h2_trail, &o_trail,
                     step, val, target, pred,
                     epoch, epochs, loss, prev_loss
                 );
-                time::usleep(5000);
+                // time::usleep(80);
 
                 tape::run_tape_backward(&output_tl, &t[0]);
                 tape::run_tape_update(&hidden, 0.0);
@@ -268,9 +261,10 @@ pub const test_seq_memory -> fn () void {
 
             prev_loss = loss;
             hidden.reset();
+            hidden_2.reset();
             output_tl.reset();
         }
     }
 
-    print_recall_table(&hidden, &output_tl, seqs, NUM_SEQS);
+    print_recall_table(&hidden, &hidden_2, &output_tl, seqs, NUM_SEQS);
 }

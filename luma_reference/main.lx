@@ -9,8 +9,8 @@
 pub const main -> fn () int {
     libc::srand(libc::time(cast<*int>(0)));
 
-    // seq_tests::test_seq_memory();
-    tape_tests::test_tape_neural();
+    seq_tests::test_seq_memory();
+    // tape_tests::test_tape_neural();
 
     return 0;
 }
