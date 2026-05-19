@@ -1,0 +1,10 @@
+[project]
+name      = "neural"
+directory = "luma_reference"
+entry     = "luma_reference/main.lx"
+
+[build]
+flags = "-O3 --no-sanitize"
+
+[output]
+binary_dir = "bin"

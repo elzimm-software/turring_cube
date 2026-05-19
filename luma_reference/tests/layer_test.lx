@@ -1,0 +1,74 @@
+@module "layer_tests"
+
+@use "std_libc" as libc
+
+@use "unit_test" as test
+@use "layer" as layer
+
+pub const layer_run -> fn () void {
+    let suite: TestSuite = test::init_suite("layer", 16);
+    defer { test::free_suite(&suite); }
+
+    let l: Layer = layer::init_layer(4, 2);
+    suite.run("init_layer sets num_inputs",  l.num_inputs  == 4, "expected 4");
+    suite.run("init_layer sets num_outputs", l.num_outputs == 2, "expected 2");
+
+    l.init_weights_biases();
+    let inputs: [double; 4] = [1.0, 0.5, 0.2, 0.8];
+    l.forward(&inputs[0]);
+    let bounded: bool = true;
+    loop [i: int = 0](i < l.num_outputs) : (++i) {
+        if (l.outputs[i] < 0.0 || l.outputs[i] > 1.0)
+            bounded = false;
+    }
+    suite.run("forward outputs bounded 0..1", bounded, "sigmoid output out of range");
+
+    let a: [double; 1] = [0.5];
+    let b: [double; 1] = [0.5];
+    suite.run("mse_loss identical is zero", layer::mse_loss(&a[0], &b[0], 1) == 0.0, "expected 0.0");
+
+    let c: [double; 1] = [1.0];
+    let d: [double; 1] = [0.0];
+    suite.run("mse_loss 1 vs 0 is 1", layer::mse_loss(&c[0], &d[0], 1) == 1.0, "expected 1.0");
+
+    let hidden: Layer = layer::init_layer(2, 4);
+    let output_layer: Layer = layer::init_layer(4, 1);
+    defer { layer::free_layer(&hidden); }
+
+    hidden.init_weights_biases();
+    output_layer.init_weights_biases();
+    hidden.next = &output_layer;
+    layer::link_layers(&hidden);
+    layer::save_weights(&hidden, "saved_weights/roundtrip.bin");
+
+    let loaded_hidden: Layer = layer::init_layer(2, 4);
+    let loaded_output: Layer = layer::init_layer(4, 1);
+    defer { layer::free_layer(&loaded_hidden); }
+
+    loaded_hidden.next = &loaded_output;
+    layer::link_layers(&loaded_hidden);
+    layer::load_weights(&loaded_hidden, "saved_weights/roundtrip.bin");
+
+    let weights_match: bool = true;
+    loop [i: int = 0](i < hidden.num_inputs * hidden.num_outputs) : (++i) {
+        if (hidden.weights[i] != loaded_hidden.weights[i]) {
+            weights_match = false;
+            break;
+        }
+    }
+    suite.run("save/load weights round trip (hidden)", weights_match,
+              "weights mismatch after loading");
+
+    let output_weights_match: bool = true;
+    loop [i: int = 0](i < output_layer.num_inputs * output_layer.num_outputs) : (++i) {
+        if (output_layer.weights[i] != loaded_output.weights[i]) {
+            output_weights_match = false;
+            break;
+        }
+    }
+    suite.run("save/load weights round trip (output)", output_weights_match,
+              "output layer weights mismatch after loading");
+
+    layer::free_layer(&l);
+    suite.report();
+}

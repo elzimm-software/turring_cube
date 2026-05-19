@@ -1,0 +1,255 @@
+@module "viz"
+
+@use "std_libc" as libc
+@use "tape"     as tape
+
+pub const RESET:    *byte = "\x1b[0m";
+pub const BOLD:     *byte = "\x1b[1m";
+pub const DIM:      *byte = "\x1b[2m";
+pub const FG_RED:   *byte = "\x1b[31m";
+pub const FG_GREEN: *byte = "\x1b[32m";
+pub const FG_CYAN:  *byte = "\x1b[36m";
+pub const FG_GREY:  *byte = "\x1b[90m";
+
+pub const print_fixed2 -> fn (v: double) void {
+    let scaled: int = cast<int>(v * 100.0);
+    if (v < 0.0) {
+        if (scaled > 0) scaled = -scaled;
+        output("-");
+    } else {
+        output(" ");
+    }
+    let a: int = scaled;
+    if (a < 0) a = -a;
+    output(a / 100);
+    output(".");
+    let frac: int = a % 100;
+    if (frac < 10) output("0");
+    output(frac);
+}
+
+const TRAIL_LEN: int = 6;
+
+pub const HeadTrail -> struct {
+    xs:   [int; 6],
+    ys:   [int; 6],
+    head: int,
+    size: int,
+
+    push -> fn (x: int, y: int) void {
+        self.xs[self.head] = x;
+        self.ys[self.head] = y;
+        self.head = (self.head + 1) % TRAIL_LEN;
+        if (self.size < TRAIL_LEN) self.size = self.size + 1;
+    },
+
+    // Returns how many steps ago (x,y) was visited. 0 = most recent, -1 = not found.
+    age_of -> fn (x: int, y: int) int {
+        loop [i: int = 0](i < self.size) : (++i) {
+            let idx: int = (self.head - 1 - i + TRAIL_LEN) % TRAIL_LEN;
+            if (self.xs[idx] == x && self.ys[idx] == y) return i;
+        }
+        return -1;
+    },
+
+    reset -> fn () void {
+        self.head = 0;
+        self.size = 0;
+    },
+};
+
+pub const init_trail -> fn () HeadTrail {
+    return HeadTrail {
+        xs: [0, 0, 0, 0, 0, 0],
+        ys: [0, 0, 0, 0, 0, 0],
+        head: 0,
+        size: 0,
+    };
+}
+
+pub const show_tape_grid -> fn (t: *Tape, trail: *HeadTrail, label: *byte) void {
+    output(BOLD); output(label); output(RESET);
+    output(" (", t.width, "x", t.width, ")");
+    output("  head=(", t.head_x, ",", t.head_y, ")\n");
+
+    let w: int = t.width;
+
+    output("  +");
+    loop [col: int = 0](col < w) : (++col) { output("------"); }
+    output("+\n");
+
+    loop [row: int = 0](row < w) : (++row) {
+        output("  |");
+        loop [col: int = 0](col < w) : (++col) {
+            let v:       double = t.cells[row * w + col];
+            let is_head: bool   = (col == t.head_x && row == t.head_y);
+            let age:     int    = trail.age_of(col, row);
+
+            if (is_head) {
+                output(FG_CYAN); output(BOLD); output("  * ");
+                print_fixed2(v);
+                output(RESET);
+            } else if (age == 0) {
+                output(FG_GREEN); output("  + ");
+                print_fixed2(v);
+                output(RESET);
+            } else if (age == 1) {
+                output(FG_GREY); output("  . ");
+                print_fixed2(v);
+                output(RESET);
+            } else {
+                if (v > 0.70)      { output(FG_GREEN); output(BOLD); }
+                else if (v > 0.35) { output(FG_GREEN); output(DIM);  }
+                else if (v < 0.00) { output(FG_RED);   output(DIM);  }
+                else               { output(FG_GREY);                }
+                output("    ");
+                print_fixed2(v);
+                output(RESET);
+            }
+        }
+        output("|\n");
+    }
+
+    output("  +");
+    loop [col: int = 0](col < w) : (++col) { output("------"); }
+    output("+\n");
+}
+
+const BAR_W: int = 20;
+
+pub const show_state -> fn (state: *double, dim: int) void {
+    output(BOLD); output("  State:\n"); output(RESET);
+    loop [i: int = 0](i < dim) : (++i) {
+        let v:      double = state[i];
+        let filled: int    = cast<int>(v * cast<double>(BAR_W));
+        if (filled < 0)    filled = 0;
+        if (filled > BAR_W) filled = BAR_W;
+
+        output("    [", i, "]  ");
+        output(FG_GREEN);
+        loop [b: int = 0](b < filled)  : (++b) { output("█"); }
+        output(RESET); output(FG_GREY);
+        loop [b: int = filled](b < BAR_W) : (++b) { output("░"); }
+        output(RESET);
+        output("  ");
+        print_fixed2(v);
+        output("\n");
+    }
+}
+
+pub const show_loss -> fn (loss: double, prev_loss: double) void {
+    output(BOLD); output("  Loss: "); output(RESET);
+
+    // Scale by 4 so the bar is meaningful for typical MSE values (0..0.25).
+    let scaled: double = loss * 4.0;
+    if (scaled > 1.0) scaled = 1.0;
+    let filled: int = cast<int>(scaled * cast<double>(BAR_W));
+    if (filled < 0)    filled = 0;
+    if (filled > BAR_W) filled = BAR_W;
+
+    output(FG_RED);
+    loop [b: int = 0](b < filled)  : (++b) { output("█"); }
+    output(RESET); output(FG_GREY);
+    loop [b: int = filled](b < BAR_W) : (++b) { output("░"); }
+    output(RESET);
+
+    output("  ");
+    print_fixed2(loss);
+
+    if (prev_loss >= 0.0) {
+        let delta: double = loss - prev_loss;
+        if (delta <= 0.0) { output(FG_GREEN); output("  v "); }
+        else              { output(FG_RED);   output("  ^ "); }
+        print_fixed2(delta);
+        output(RESET);
+    }
+    output("\n");
+}
+
+pub const show_epoch -> fn (epoch: int, total: int) void {
+    output(BOLD); output("  Epoch "); output(RESET);
+    output(epoch, " / ", total, "  ");
+
+    let pct:    double = cast<double>(epoch) / cast<double>(total);
+    let filled: int    = cast<int>(pct * cast<double>(BAR_W));
+    if (filled < 0)    filled = 0;
+    if (filled > BAR_W) filled = BAR_W;
+
+    output(FG_CYAN);
+    loop [b: int = 0](b < filled)  : (++b) { output("█"); }
+    output(RESET); output(FG_GREY);
+    loop [b: int = filled](b < BAR_W) : (++b) { output("░"); }
+    output(RESET);
+
+    let pct_int: int = cast<int>(pct * 100.0);
+    output("  ", pct_int, "%\n");
+}
+
+pub const show_prediction -> fn (
+    tl:       *TapeLayer,
+    inputs:   *double,
+    n_inputs: int,
+    target:   double
+) void {
+    let act: *double = tl.outputs_begin();
+    let pred: double = act[0];
+    let pass: bool   = (pred > 0.5) == (target > 0.5);
+
+    output("  In: [");
+    loop [i: int = 0](i < n_inputs) : (++i) { output(" ", cast<int>(inputs[i])); }
+    output(" ]   Pred: ");
+
+    if (pass) output(FG_GREEN); else output(FG_RED);
+    print_fixed2(pred);
+    output(RESET);
+
+    output("   Target: ");
+    print_fixed2(target);
+
+    if (pass) { output(FG_GREEN); output(BOLD); output("   [PASS v]"); }
+    else      { output(FG_RED);   output(BOLD); output("   [FAIL x]"); }
+    output(RESET);
+    output("\n");
+}
+
+pub const show_step -> fn (
+    h:         *TapeLayer,
+    o:         *TapeLayer,
+    h_trail:   *HeadTrail,
+    o_trail:   *HeadTrail,
+    inputs:    *double,
+    n_inputs:  int,
+    target:    double,
+    loss:      double,
+    prev_loss: double,
+    epoch:     int,
+    total:     int,
+    gate_name: *byte
+) void {
+    output("\x1b[2J\x1b[H");
+
+    output(BOLD);
+    output("╔══════════════════════════════════════════╗\n");
+    output("║     Tape Neural Network Viewer — ");
+    output(gate_name);
+    output("      ║\n");
+    output("╚══════════════════════════════════════════╝\n");
+    output(RESET);
+    output("\n");
+
+    show_epoch(epoch, total);
+    show_loss(loss, prev_loss);
+    output("\n");
+
+    show_prediction(o, inputs, n_inputs, target);
+    output("\n");
+
+    show_tape_grid(&h.tape, h_trail, "Hidden Tape ");
+    show_state(h.state, h.state_dim);
+    output("\n");
+
+    show_tape_grid(&o.tape, o_trail, "Output Tape ");
+    show_state(o.state, o.state_dim);
+    output("\n");
+}
+

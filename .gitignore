@@ -1,1 +1,5 @@
 /target
+
+# Getting ride of the luma build files
+obj
+bin

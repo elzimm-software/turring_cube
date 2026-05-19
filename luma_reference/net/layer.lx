@@ -1,0 +1,246 @@
+@module "layer"
+
+@use "std_libc" as libc
+@use "std_io" as io
+
+@use "helper" as helper
+
+pub const Layer -> struct {
+    num_inputs:  int,
+    num_outputs: int,
+
+    weights: *double,
+    biases:  *double,
+    z:       *double,
+    outputs: *double,
+    deltas:  *double,
+    grad_w:  *double,
+
+    prev: *Layer,
+    next: *Layer,
+
+    init_weights_biases -> fn () void {
+        let limit: double = libc::sqrt(6 / cast<double>(self.num_inputs + self.num_outputs));
+        let n: int = self.num_inputs * self.num_outputs;
+        loop [i: int = 0](i < n) : (++i) {
+            self.weights[i] = helper::random_double(-limit, limit);
+        }
+        loop [j: int = 0](j < self.num_outputs) : (++j) {
+            self.biases[j] = 0.0;
+        }
+    },
+
+    forward -> fn (inputs: *double) void {
+        loop [j: int = 0](j < self.num_outputs) : (++j) {
+            let sum: double = self.biases[j];
+            loop [i: int = 0](i < self.num_inputs) : (++i) {
+                sum = sum + inputs[i] * self.weights[i * self.num_outputs + j];
+            }
+            self.z[j] = sum;
+        }
+        loop [j: int = 0](j < self.num_outputs) : (++j) {
+            self.outputs[j] = helper::sigmoid(self.z[j]);
+        }
+    },
+
+    compute_output_delta -> fn (targets: *double) void {
+        loop [j: int = 0](j < self.num_outputs) : (++j) {
+            let sig_prime: double = self.outputs[j] * (1.0 - self.outputs[j]);
+            self.deltas[j] = (self.outputs[j] - targets[j]) * sig_prime;
+        }
+    },
+
+    compute_hidden_delta -> fn () void {
+        loop [i: int = 0](i < self.num_outputs) : (++i) {
+            let error: double = 0.0;
+            loop [j: int = 0](j < self.next.num_outputs) : (++j) {
+                error = error + self.next.weights[i * self.next.num_outputs + j] * self.next.deltas[j];
+            }
+            let sig_prime: double = self.outputs[i] * (1.0 - self.outputs[i]);
+            self.deltas[i] = error * sig_prime;
+        }
+    },
+
+    update_weights -> fn (inputs: *double, learning_rate: double) void {
+        loop [i: int = 0](i < self.num_inputs) : (++i) {
+            loop [j: int = 0](j < self.num_outputs) : (++j) {
+                self.grad_w[i * self.num_outputs + j] = inputs[i] * self.deltas[j];
+                self.weights[i * self.num_outputs + j] = self.weights[i * self.num_outputs + j]
+                    - learning_rate * self.grad_w[i * self.num_outputs + j];
+            }
+        }
+        loop [j: int = 0](j < self.num_outputs) : (++j) {
+            self.biases[j] = self.biases[j] - learning_rate * self.deltas[j];
+        }
+    },
+
+    print_forward -> fn () void {
+        output("  z = [ ");
+        loop [j: int = 0](j < self.num_outputs) : (++j) {
+            output(self.z[j]);
+            if (j < self.num_outputs - 1) output(", ");
+        }
+        output(" ]\n");
+
+        output("  a = [ ");
+        loop [j: int = 0](j < self.num_outputs) : (++j) {
+            output(self.outputs[j]);
+            if (j < self.num_outputs - 1) output(", ");
+        }
+        output(" ]\n");
+    },
+};
+
+pub const LayerIterable -> struct {
+    head:    *Layer,
+    current: *Layer,
+    count:   int,
+
+    next -> fn () *Layer {
+        if (self.current == cast<*Layer>(0)) return cast<*Layer>(0);
+        let layer: *Layer = self.current;
+        self.current = self.current.next;
+        self.count = self.count + 1;
+        return layer;
+    },
+
+    has_next -> fn () bool { return self.current != cast<*Layer>(0); },
+
+    reset -> fn () void {
+        self.current = self.head;
+        self.count = 0;
+    },
+};
+
+#returns_ownership
+pub const init_layer -> fn (num_inputs: int, num_outputs: int) Layer {
+    return Layer {
+        num_inputs:  num_inputs,
+        num_outputs: num_outputs,
+        weights: cast<*double>(alloc(num_inputs * num_outputs * sizeof<double>)),
+        biases:  cast<*double>(alloc(num_outputs * sizeof<double>)),
+        z:       cast<*double>(alloc(num_outputs * sizeof<double>)),
+        outputs: cast<*double>(alloc(num_outputs * sizeof<double>)),
+        deltas:  cast<*double>(alloc(num_outputs * sizeof<double>)),
+        grad_w:  cast<*double>(alloc(num_inputs * num_outputs * sizeof<double>)),
+        prev:    cast<*Layer>(0),
+        next:    cast<*Layer>(0),
+    };
+}
+
+pub const link_layers -> fn (head: *Layer) void {
+    let current: *Layer = head;
+    loop (current != cast<*Layer>(0)) {
+        if (current.next != cast<*Layer>(0)) {
+            let tmp: *Layer = current.next;
+            tmp.prev = current;
+        }
+        current = current.next;
+    }
+}
+
+pub const iter_init -> fn (l: *Layer) LayerIterable {
+    return LayerIterable {
+        head:    l,
+        current: l,
+        count:   0,
+    };
+}
+
+#takes_ownership
+pub const free_layer -> fn (l: *Layer) void {
+    free(l.weights);
+    free(l.biases);
+    free(l.z);
+    free(l.outputs);
+    free(l.deltas);
+    free(l.grad_w);
+
+    if (l.next != cast<*Layer>(0))
+        free_layer(l.next);
+}
+
+pub const run_forward -> fn (head: *Layer, inputs: *double) void {
+    let it: LayerIterable = iter_init(head);
+    let current: *double = inputs;
+    loop (it.has_next()) {
+        let l: *Layer = it.next();
+        l.forward(current);
+        current = l.outputs;
+    }
+}
+
+pub const run_backward -> fn (out: *Layer, target: *double) void {
+    out.compute_output_delta(target);
+    let back: *Layer = out.prev;
+    loop (back != cast<*Layer>(0)) {
+        back.compute_hidden_delta();
+        back = back.prev;
+    }
+}
+
+pub const run_update -> fn (head: *Layer, inputs: *double, learning_rate: double) void {
+    head.update_weights(inputs, learning_rate);
+    let it: LayerIterable = iter_init(head.next);
+    loop (it.has_next()) {
+        let l: *Layer = it.next();
+        l.update_weights(l.prev.outputs, learning_rate);
+    }
+}
+
+const save_weights_fd -> fn (l: *Layer, fd: int) void {
+    io::local_write(fd, cast<*void>(&l.num_inputs),  sizeof<int>);
+    io::local_write(fd, cast<*void>(&l.num_outputs), sizeof<int>);
+
+    let weight_bytes: int = l.num_inputs * l.num_outputs * sizeof<double>;
+    let bias_bytes:   int = l.num_outputs * sizeof<double>;
+    io::local_write(fd, cast<*void>(l.weights), weight_bytes);
+    io::local_write(fd, cast<*void>(l.biases),  bias_bytes);
+
+    if (l.next != cast<*Layer>(0))
+        save_weights_fd(l.next, fd);
+}
+
+const load_weights_fd -> fn (l: *Layer, fd: int) void {
+    let tmp_inputs:  int = 0;
+    let tmp_outputs: int = 0;
+    io::local_read(fd, cast<*void>(&tmp_inputs),  sizeof<int>);
+    io::local_read(fd, cast<*void>(&tmp_outputs), sizeof<int>);
+
+    let weight_bytes: int = l.num_inputs * l.num_outputs * sizeof<double>;
+    let bias_bytes:   int = l.num_outputs * sizeof<double>;
+    io::local_read(fd, cast<*void>(l.weights), weight_bytes);
+    io::local_read(fd, cast<*void>(l.biases),  bias_bytes);
+
+    if (l.next != cast<*Layer>(0))
+        load_weights_fd(l.next, fd);
+}
+
+pub const save_weights -> fn (l: *Layer, path: *byte) void {
+    let fd: int = io::local_open_create(path);
+    if (io::local_is_error(fd)) {
+        output("Error: Could not open file for writing: ", path, "\n");
+        return;
+    }
+    save_weights_fd(l, fd);
+    io::local_close(fd);
+}
+
+pub const load_weights -> fn (l: *Layer, path: *byte) void {
+    let fd: int = io::local_open_read(path);
+    if (io::local_is_error(fd)) {
+        output("Error: Could not open file for reading: ", path, "\n");
+        return;
+    }
+    load_weights_fd(l, fd);
+    io::local_close(fd);
+}
+
+pub const mse_loss -> fn (outputs: *double, targets: *double, n: int) double {
+    let sum: double = 0.0;
+    loop [i: int = 0](i < n) : (++i) {
+        let diff: double = outputs[i] - targets[i];
+        sum = sum + diff * diff;
+    }
+    return sum / cast<double>(n);
+}

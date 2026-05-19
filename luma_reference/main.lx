@@ -1,0 +1,16 @@
+@module "main"
+
+@use "std_libc" as libc
+@use "std_time" as time 
+
+@use "tape_tests" as tape_tests
+@use "seq_tests"  as seq_tests
+
+pub const main -> fn () int {
+    libc::srand(libc::time(cast<*int>(0)));
+
+    // seq_tests::test_seq_memory();
+    tape_tests::test_tape_neural();
+
+    return 0;
+}

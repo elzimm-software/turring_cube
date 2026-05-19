@@ -1,0 +1,24 @@
+@module "helper"
+
+@use "std_libc" as libc
+
+const RAND_MAX: double = 2147483647.0;
+
+const INT_MAX: double = 2147483647.0;
+const INT_MIN: double = -2147483648.0;
+
+pub const sigmoid -> fn (x: double) double {
+    if (x > 500.0)  return 1.0;
+    if (x < -500.0) return 0.0;
+    return 1.0 / (1.0 + libc::exp(-x));
+}
+
+pub const random_double -> fn (min: double, max: double) double {
+    return (cast<double>(libc::rand()) / RAND_MAX) * (max - min) + min;
+}
+
+pub const double_to_int -> fn (x: double) int {
+    if (x > INT_MAX) return cast<int>(INT_MAX);
+    if (x < INT_MIN) return cast<int>(INT_MIN);
+    return cast<int>(x);
+}

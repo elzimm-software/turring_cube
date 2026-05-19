@@ -1,0 +1,61 @@
+@module "unit_test"
+
+pub const TestResult -> enum {
+    Pass,
+    Fail,
+};
+
+pub const TestCase -> struct {
+    name:   *byte,
+    result: int,
+    message: *byte,
+};
+
+pub const TestSuite -> struct {
+    name:     *byte,
+    tests:    *TestCase,
+    count:    int,
+    capacity: int,
+
+    run -> fn (test_name: *byte, passed: bool, msg: *byte) void {
+        if (self.count >= self.capacity) return;
+
+        let t: *TestCase = &self.tests[self.count];
+        t.name    = test_name;
+        t.message = msg;
+
+        if (passed) t.result = TestResult::Pass;
+        else        t.result = TestResult::Fail;
+
+        self.count = self.count + 1;
+    },
+
+    report -> fn () void {
+        output("\nTest suite: ", self.name, "\n");
+
+        let passed: int = 0;
+        loop [i: int = 0](i < self.count) : (++i) {
+            if (self.tests[i].result == TestResult::Pass) {
+                output("  ✓ ", self.tests[i].name, "\n");
+                passed = passed + 1;
+            } else {
+                output("  ✗ ", self.tests[i].name, " — ", self.tests[i].message, "\n");
+            }
+        }
+
+        output(self.count, " tests, ", passed, " passed, ", self.count - passed, " failed\n");
+    },
+};
+
+pub const init_suite -> fn (name: *byte, capacity: int) TestSuite {
+    return TestSuite {
+        name:     name,
+        tests:    cast<*TestCase>(alloc(capacity * sizeof<TestCase>)),
+        count:    0,
+        capacity: capacity,
+    };
+}
+
+pub const free_suite -> fn (s: *TestSuite) void {
+    free(s.tests);
+}

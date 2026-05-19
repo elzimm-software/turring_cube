@@ -1,0 +1,437 @@
+@module "tape"
+
+@use "std_libc" as libc
+@use "helper"   as helper
+@use "layer"    as layer
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT IS A TAPE LAYER?
+//
+// A normal Layer takes a vector of inputs and produces a vector of outputs.
+// There is no memory — every forward pass starts fresh.
+//
+// A TapeLayer wraps a normal Layer and adds three things:
+//
+//   1. TAPE   — a flat 2D grid of doubles sitting at this layer's "depth" in
+//               3D space. Think of it as a notepad the layer can read and write.
+//               Size: tape_width × tape_width cells.
+//
+//   2. HEAD   — an integer (x, y) position on the tape. The layer only reads
+//               and writes at this one spot each step. The head moves after
+//               each forward pass based on what the layer computed.
+//
+//   3. STATE  — a small vector of doubles carried forward from one TapeLayer
+//               to the next. This is the "working memory" — information that
+//               does not need to be written to the tape but should persist.
+//
+// Together these let the network remember things across forward passes and
+// across layers, which a plain neural net cannot do.
+//
+// ── BACKPROP OVERVIEW ────────────────────────────────────────────────────────
+//
+// Backprop works exactly like in a normal network — we compute how much each
+// weight contributed to the final error and nudge it in the right direction.
+// The complication here is that each layer has an AUGMENTED input:
+//
+//   aug = [ tape_read, state_0..state_{d-1}, input_0..input_{N-1} ]
+//
+// So the inner Layer's weights connect to this augmented input, not just the
+// raw activations. We must save aug during the forward pass so we can reuse
+// it for the weight update (update_weights needs the exact inputs that were
+// used when the forward pass ran).
+//
+// Output layout of each inner Layer:
+//   [0]          write value  → tape         (target = current output, zero error)
+//   [1]          move dx      → head          (target = current output, zero error)
+//   [2]          move dy      → head          (target = current output, zero error)
+//   [3..3+d-1]   new state                   (gradient flows from next layer)
+//   [3+d..]      activations                 (gradient flows from next layer)
+//
+// We treat outputs [0..2] (write + move) as having zero error signal — the
+// network learns to use them indirectly through how well the activations
+// and state evolve. This is the same simplification used in the original
+// Neural Turing Machine paper before soft attention was introduced.
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub const Tape -> struct {
+    cells:      *double,
+    width:      int,
+    head_x:     int,
+    head_y:     int,
+
+    read -> fn () double {
+        return self.cells[self.head_y * self.width + self.head_x];
+    },
+
+    write -> fn (value: double) void {
+        self.cells[self.head_y * self.width + self.head_x] = value;
+    },
+
+    move_head -> fn (dx: int, dy: int) void {
+        self.head_x = (self.head_x + dx + self.width) % self.width;
+        self.head_y = (self.head_y + dy + self.width) % self.width;
+    },
+
+    reset -> fn () void {
+        self.head_x = 0;
+        self.head_y = 0;
+        loop [i: int = 0](i < self.width * self.width) : (++i) {
+            self.cells[i] = 0.0;
+        }
+    },
+
+    print_window -> fn (r: int) void {
+        output("  tape head=(", self.head_x, ",", self.head_y, ") window r=", r, "\n");
+        loop [row: int = self.head_y - r](row <= self.head_y + r) : (++row) {
+            let ry: int = (row + self.width) % self.width;
+            output("  ");
+            loop [col: int = self.head_x - r](col <= self.head_x + r) : (++col) {
+                let cx: int = (col + self.width) % self.width;
+                let v:  double = self.cells[ry * self.width + cx];
+                if (col == self.head_x && row == self.head_y) output("*");
+                else                                           output(" ");
+                output(v);
+                output(" ");
+            }
+            output("\n");
+        }
+    },
+};
+
+#returns_ownership
+pub const init_tape -> fn (width: int) Tape {
+    let n: int = width * width;
+    let cells: *double = cast<*double>(alloc(n * sizeof<double>));
+    loop [i: int = 0](i < n) : (++i) {
+        cells[i] = 0.0;
+    }
+    return Tape {
+        cells:  cells,
+        width:  width,
+        head_x: 0,
+        head_y: 0,
+    };
+}
+
+pub const free_tape -> fn (t: *Tape) void {
+    free(t.cells);
+}
+
+pub const TapeLayer -> struct {
+    layer:      Layer,
+    tape:       Tape,
+    state:      *double,   // current state vector (size = state_dim)
+    state_dim:  int,
+
+    // ── saved augmented input ─────────────────────────────────────────────
+    // During forward we build aug = [tape_read, state..., inputs...] and
+    // pass it to layer.forward(). We must save it so backward can call
+    // layer.update_weights(aug, lr) with the exact same values.
+    // saved_aug is heap-allocated in forward() and freed in update().
+    saved_aug:      *double,
+    saved_aug_size: int,
+
+    // ── gradient buffer for incoming activation errors ────────────────────
+    // After delta computation, this holds dL/d(aug_input[i]) for every
+    // position in the augmented input. The previous TapeLayer reads the
+    // activation slots here to propagate its own hidden delta.
+    // Size = layer.num_inputs (full augmented size).
+    input_grads: *double,
+
+    prev_tape:  *TapeLayer,
+    next_tape:  *TapeLayer,
+
+    forward -> fn (inputs: *double, num_inputs: int) void {
+        let aug_size: int = 1 + self.state_dim + num_inputs;
+
+        if (self.saved_aug != cast<*double>(0)) {
+            free(self.saved_aug);
+        }
+        self.saved_aug      = cast<*double>(alloc(aug_size * sizeof<double>));
+        self.saved_aug_size = aug_size;
+
+        self.saved_aug[0] = self.tape.read();
+        loop [i: int = 0](i < self.state_dim) : (++i) {
+            self.saved_aug[1 + i] = self.state[i];
+        }
+        loop [i: int = 0](i < num_inputs) : (++i) {
+            self.saved_aug[1 + self.state_dim + i] = inputs[i];
+        }
+
+        self.layer.forward(self.saved_aug);
+
+        self.tape.write(self.layer.outputs[0]);
+
+        let raw_dx: double = self.layer.outputs[1];
+        let raw_dy: double = self.layer.outputs[2];
+        let dx: int = 0;
+        let dy: int = 0;
+        if (raw_dx > 0.6) dx =  1;
+        if (raw_dx < 0.4) dx = -1;
+        if (raw_dy > 0.6) dy =  1;
+        if (raw_dy < 0.4) dy = -1;
+        self.tape.move_head(dx, dy);
+
+        loop [i: int = 0](i < self.state_dim) : (++i) {
+            self.state[i] = self.layer.outputs[3 + i];
+        }
+    },
+
+    compute_input_grads -> fn () void {
+        let layer: *Layer = &self.layer;
+        loop [i: int = 0](i < layer.num_inputs) : (++i) {
+            let error: double = 0.0;
+            loop [j: int = 0](j < layer.num_outputs) : (++j) {
+                let widx: int = i * layer.num_outputs + j;
+                let w:  double = layer.weights[widx];
+                let d:  double = layer.deltas[j];
+                error = error + w * d;
+            }
+            self.input_grads[i] = error;
+        }
+    },
+
+    // ── compute_output_delta ─────────────────────────────────────────────
+    // Call on the LAST TapeLayer only.
+    //
+    // targets covers only the activation outputs (length = num_activations()).
+    // We construct a full_targets vector for all inner-layer outputs, setting
+    // the write/move/state slots to their current output values so their
+    // error term is zero — we do not supervise those outputs directly.
+    //
+    // Plain English: "you were wrong by X on the prediction outputs;
+    // do whatever you want with the tape and state outputs."
+    compute_output_delta -> fn (targets: *double) void {
+        let n: int = self.layer.num_outputs;
+        let full_targets: *double = cast<*double>(alloc(n * sizeof<double>));
+
+        // write, move_dx, move_dy — zero supervised error.
+        loop [j: int = 0](j < 3) : (++j) {
+            full_targets[j] = self.layer.outputs[j];
+        }
+
+        // state outputs — zero supervised error at the output layer.
+        loop [j: int = 0](j < self.state_dim) : (++j) {
+            full_targets[3 + j] = self.layer.outputs[3 + j];
+        }
+
+        // activation outputs — real supervised targets.
+        let act_start: int = 3 + self.state_dim;
+        let num_act:   int = self.layer.num_outputs - act_start;
+        loop [j: int = 0](j < num_act) : (++j) {
+            full_targets[act_start + j] = targets[j];
+        }
+
+        self.layer.compute_output_delta(full_targets);
+        free(full_targets);
+
+        self.compute_input_grads();
+    },
+
+    // Gradient flows from the next tape layer through the activation path:
+    //   Our activation outputs (indices act_start..) became activation inputs to
+    //   the next layer's aug (at indices 1+d_next..).
+    //   Gradient: next.layer.weights[aug_idx][j] * next.layer.deltas[j]
+    //
+    // The tape outputs (write, dx, dy) and state outputs have no gradient
+    // flowing to them from the next layer — each layer's state and tape are
+    // independent in a single forward pass.
+    compute_hidden_delta -> fn () void {
+        let next: *TapeLayer = self.next_tape;
+        let nlayer: *Layer = &next.layer;
+        let layer: *Layer = &self.layer;
+        let act_start: int = 3 + self.state_dim;
+        let no_next: int = nlayer.num_outputs;
+
+        loop [i: int = 0](i < layer.num_outputs) : (++i) {
+            let error: double = 0.0;
+
+            if (i >= act_start) {
+                let act_idx:      int = i - act_start;
+                let next_aug_idx: int = 1 + next.state_dim + act_idx;
+                loop [j: int = 0](j < no_next) : (++j) {
+                    error = error
+                        + nlayer.weights[next_aug_idx * no_next + j]
+                        * nlayer.deltas[j];
+                }
+            }
+
+            let sig_prime: double = layer.outputs[i] * (1.0 - layer.outputs[i]);
+            layer.deltas[i] = error * sig_prime;
+        }
+
+        self.compute_input_grads();
+    },
+
+    update -> fn (learning_rate: double) void {
+        if (self.saved_aug == cast<*double>(0)) return;
+        self.layer.update_weights(self.saved_aug, learning_rate);
+        free(self.saved_aug);
+        self.saved_aug = cast<*double>(0);
+    },
+
+    outputs_begin -> fn () *double {
+        let layer: *Layer = &self.layer;
+        return &layer.outputs[3 + self.state_dim];
+    },
+
+    num_activations -> fn () int {
+        return self.layer.num_outputs - 3 - self.state_dim;
+    },
+
+    reset -> fn () void {
+        self.tape.reset();
+        loop [i: int = 0](i < self.state_dim) : (++i) {
+            self.state[i] = 0.0;
+        }
+        if (self.saved_aug != cast<*double>(0)) {
+            free(self.saved_aug);
+            self.saved_aug = cast<*double>(0);
+        }
+    },
+
+    print_debug -> fn () void {
+        output("  --- TapeLayer debug ---\n");
+        self.tape.print_window(1);
+        output("  state = [ ");
+        loop [i: int = 0](i < self.state_dim) : (++i) {
+            output(self.state[i]);
+            if (i < self.state_dim - 1) output(", ");
+        }
+        output(" ]\n");
+        output("  activations = [ ");
+        let na: int = self.num_activations();
+        let base: *double = self.outputs_begin();
+        loop [i: int = 0](i < na) : (++i) {
+            output(base[i]);
+            if (i < na - 1) output(", ");
+        }
+        output(" ]\n");
+        output("  weights[0..4] = [ ");
+        loop [i: int = 0](i < 5) : (++i) {
+            output(self.layer.weights[i]);
+            if (i < 4) output(", ");
+        }
+        output(" ]\n");
+        output("  deltas[0..4] = [ ");
+        loop [i: int = 0](i < 5) : (++i) {
+            output(self.layer.deltas[i]);
+            if (i < 4) output(", ");
+        }
+        output(" ]\n");
+        output("  input_grads[0..4] = [ ");
+        loop [i: int = 0](i < 5) : (++i) {
+            output(self.input_grads[i]);
+            if (i < 4) output(", ");
+        }
+        output(" ]\n");
+        output("  --------\n");
+    },
+};
+
+#returns_ownership
+pub const init_tape_layer -> fn (
+    activation_inputs:  int,
+    activation_outputs: int,
+    state_dim:          int,
+    tape_width:         int
+) TapeLayer {
+    let layer_inputs:  int = 1 + state_dim + activation_inputs;
+    let layer_outputs: int = 1 + 2 + state_dim + activation_outputs;
+
+    let l: Layer = layer::init_layer(layer_inputs, layer_outputs);
+    l.init_weights_biases();
+
+    let state: *double = cast<*double>(alloc(state_dim * sizeof<double>));
+    loop [i: int = 0](i < state_dim) : (++i) {
+        state[i] = 0.0;
+    }
+
+    let input_grads: *double = cast<*double>(alloc(layer_inputs * sizeof<double>));
+    loop [i: int = 0](i < layer_inputs) : (++i) {
+        input_grads[i] = 0.0;
+    }
+
+    return TapeLayer {
+        layer:          l,
+        tape:           init_tape(tape_width),
+        state:          state,
+        state_dim:      state_dim,
+        saved_aug:      cast<*double>(0),
+        saved_aug_size: 0,
+        input_grads:    input_grads,
+        prev_tape:      cast<*TapeLayer>(0),
+        next_tape:      cast<*TapeLayer>(0),
+    };
+}
+
+pub const free_tape_layer -> fn (tl: *TapeLayer) void {
+    layer::free_layer(&tl.layer);
+    free_tape(&tl.tape);
+    free(tl.state);
+    free(tl.input_grads);
+    if (tl.saved_aug != cast<*double>(0)) {
+        free(tl.saved_aug);
+    }
+}
+
+pub const link_tape_layers -> fn (head: *TapeLayer) void {
+    let current: *TapeLayer = head;
+    loop (current != cast<*TapeLayer>(0)) {
+        let next: *TapeLayer = current.next_tape;
+        if (next != cast<*TapeLayer>(0)) {
+            next.prev_tape = current;
+        }
+        current = next;
+    }
+}
+
+pub const run_tape_forward -> fn (
+    head:           *TapeLayer,
+    raw_inputs:     *double,
+    num_raw_inputs: int
+) void {
+    let current:    *TapeLayer = head;
+    let inputs:     *double    = raw_inputs;
+    let num_inputs: int        = num_raw_inputs;
+
+    loop (current != cast<*TapeLayer>(0)) {
+        current.forward(inputs, num_inputs);
+        inputs     = current.outputs_begin();
+        num_inputs = current.num_activations();
+        current    = current.next_tape;
+    }
+}
+
+pub const run_tape_backward -> fn (
+    output_tl: *TapeLayer,
+    targets:   *double
+) void {
+    output_tl.compute_output_delta(targets);
+
+    let back: *TapeLayer = output_tl.prev_tape;
+    loop (back != cast<*TapeLayer>(0)) {
+        back.compute_hidden_delta();
+        back = back.prev_tape;
+    }
+}
+
+pub const run_tape_update -> fn (
+    head:          *TapeLayer,
+    learning_rate: double
+) void {
+    let current: *TapeLayer = head;
+    loop (current != cast<*TapeLayer>(0)) {
+        current.update(learning_rate);
+        current = current.next_tape;
+    }
+}
+
+pub const tape_mse_loss -> fn (
+    output_tl: *TapeLayer,
+    targets:   *double
+) double {
+    let base: *double = output_tl.outputs_begin();
+    let n:    int     = output_tl.num_activations();
+    return layer::mse_loss(base, targets, n);
+}
