@@ -1,15 +1,17 @@
 @module "layer_tests"
 
+@use "std_arena" as arena
 @use "std_libc" as libc
 
 @use "unit_test" as test
 @use "layer" as layer
 
 pub const layer_run -> fn () void {
+    let buffer: Arena = arena::create_arena();
     let suite: TestSuite = test::init_suite("layer", 16);
-    defer { test::free_suite(&suite); }
+    defer { test::free_suite(&suite); arena::free_arena(&buffer); }
 
-    let l: Layer = layer::init_layer(4, 2);
+    let l: Layer = layer::init_layer(&buffer, 4, 2);
     suite.run("init_layer sets num_inputs",  l.num_inputs  == 4, "expected 4");
     suite.run("init_layer sets num_outputs", l.num_outputs == 2, "expected 2");
 
@@ -31,9 +33,8 @@ pub const layer_run -> fn () void {
     let d: [double; 1] = [0.0];
     suite.run("mse_loss 1 vs 0 is 1", layer::mse_loss(&c[0], &d[0], 1) == 1.0, "expected 1.0");
 
-    let hidden: Layer = layer::init_layer(2, 4);
-    let output_layer: Layer = layer::init_layer(4, 1);
-    defer { layer::free_layer(&hidden); }
+    let hidden: Layer       = layer::init_layer(&buffer, 2, 4);
+    let output_layer: Layer = layer::init_layer(&buffer, 4, 1);
 
     hidden.init_weights_biases();
     output_layer.init_weights_biases();
@@ -41,9 +42,8 @@ pub const layer_run -> fn () void {
     layer::link_layers(&hidden);
     layer::save_weights(&hidden, "saved_weights/roundtrip.bin");
 
-    let loaded_hidden: Layer = layer::init_layer(2, 4);
-    let loaded_output: Layer = layer::init_layer(4, 1);
-    defer { layer::free_layer(&loaded_hidden); }
+    let loaded_hidden: Layer = layer::init_layer(&buffer, 2, 4);
+    let loaded_output: Layer = layer::init_layer(&buffer, 4, 1);
 
     loaded_hidden.next = &loaded_output;
     layer::link_layers(&loaded_hidden);
@@ -68,7 +68,5 @@ pub const layer_run -> fn () void {
     }
     suite.run("save/load weights round trip (output)", output_weights_match,
               "output layer weights mismatch after loading");
-
-    layer::free_layer(&l);
     suite.report();
 }

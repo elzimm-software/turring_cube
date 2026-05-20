@@ -4,7 +4,7 @@ directory = "luma_reference"
 entry     = "luma_reference/main.lx"
 
 [build]
-flags = "-O3 --no-sanitize"
+flags = "-O3"
 
 [output]
 binary_dir = "bin"

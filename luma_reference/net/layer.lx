@@ -1,7 +1,8 @@
 @module "layer"
 
-@use "std_libc" as libc
-@use "std_io" as io
+@use "std_arena" as arena
+@use "std_libc"  as libc
+@use "std_io"    as io
 
 @use "helper" as helper
 
@@ -62,15 +63,22 @@ pub const Layer -> struct {
     },
 
     update_weights -> fn (inputs: *double, learning_rate: double) void {
+        let clip: double = 5.0;
         loop [i: int = 0](i < self.num_inputs) : (++i) {
             loop [j: int = 0](j < self.num_outputs) : (++j) {
-                self.grad_w[i * self.num_outputs + j] = inputs[i] * self.deltas[j];
+                let g: double = inputs[i] * self.deltas[j];
+                if (g >  clip) g =  clip;
+                if (g < -clip) g = -clip;
+                self.grad_w[i * self.num_outputs + j] = g;
                 self.weights[i * self.num_outputs + j] = self.weights[i * self.num_outputs + j]
-                    - learning_rate * self.grad_w[i * self.num_outputs + j];
+                    - learning_rate * g;
             }
         }
         loop [j: int = 0](j < self.num_outputs) : (++j) {
-            self.biases[j] = self.biases[j] - learning_rate * self.deltas[j];
+            let g: double = self.deltas[j];
+            if (g >  clip) g =  clip;
+            if (g < -clip) g = -clip;
+            self.biases[j] = self.biases[j] - learning_rate * g;
         }
     },
 
@@ -112,17 +120,16 @@ pub const LayerIterable -> struct {
     },
 };
 
-#returns_ownership
-pub const init_layer -> fn (num_inputs: int, num_outputs: int) Layer {
+pub const init_layer -> fn (buffer: *Arena, num_inputs: int, num_outputs: int) Layer {
     return Layer {
         num_inputs:  num_inputs,
         num_outputs: num_outputs,
-        weights: cast<*double>(alloc(num_inputs * num_outputs * sizeof<double>)),
-        biases:  cast<*double>(alloc(num_outputs * sizeof<double>)),
-        z:       cast<*double>(alloc(num_outputs * sizeof<double>)),
-        outputs: cast<*double>(alloc(num_outputs * sizeof<double>)),
-        deltas:  cast<*double>(alloc(num_outputs * sizeof<double>)),
-        grad_w:  cast<*double>(alloc(num_inputs * num_outputs * sizeof<double>)),
+        weights: cast<*double>(arena::alloc_arena(buffer, num_inputs * num_outputs * sizeof<double>)),
+        biases:  cast<*double>(arena::alloc_arena(buffer, num_outputs * sizeof<double>)),
+        z:       cast<*double>(arena::alloc_arena(buffer, num_outputs * sizeof<double>)),
+        outputs: cast<*double>(arena::alloc_arena(buffer, num_outputs * sizeof<double>)),
+        deltas:  cast<*double>(arena::alloc_arena(buffer, num_outputs * sizeof<double>)),
+        grad_w:  cast<*double>(arena::alloc_arena(buffer, num_inputs * num_outputs * sizeof<double>)),
         prev:    cast<*Layer>(0),
         next:    cast<*Layer>(0),
     };

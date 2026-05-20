@@ -252,4 +252,3 @@ pub const show_step -> fn (
     show_state(o.state, o.state_dim);
     output("\n");
 }
-

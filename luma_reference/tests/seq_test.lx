@@ -1,5 +1,6 @@
 @module "seq_tests"
 
+@use "std_arena" as arena
 @use "std_libc"  as libc
 @use "std_time"  as time
 
@@ -7,9 +8,9 @@
 @use "tape"  as tape
 @use "viz"   as viz
 
-const SEQ_LEN:    int = 25;
-const NUM_SEQS:   int = 50;
-const INPUT_SIZE: int = 10;
+const SEQ_LEN:    int = 8;
+const NUM_SEQS:   int = 10;
+const INPUT_SIZE: int = 4;
 
 const gen_sequences -> fn (seqs: *double) void {
     let n: int = NUM_SEQS * SEQ_LEN;
@@ -31,10 +32,7 @@ const eval_seq_loss -> fn (
         let target: double = 0.0;
         if (step > 0) target = seq[step - 1];
 
-        let t: [double; 1] = [target];
         tape::run_tape_forward(head, &val, INPUT_SIZE);
-        tape::run_tape_backward(output_tl, &t[0]);
-        tape::run_tape_update(head, 0.0);
 
         let act:  *double = output_tl.outputs_begin();
         let diff: double  = act[0] - target;
@@ -138,8 +136,6 @@ const print_recall_table -> fn (
             tape::run_tape_forward(head, &val, INPUT_SIZE);
             let act:  *double = output_tl.outputs_begin();
             let pred: double  = act[0];
-            tape::run_tape_backward(output_tl, &t[0]);
-            tape::run_tape_update(head, 0.0);
 
             if (step == 0) {
                 output("   --     ║");
@@ -174,21 +170,17 @@ const print_recall_table -> fn (
 }
 
 pub const test_seq_memory -> fn () void {
-    let hidden_size: int    = 25;
+    let hidden_size: int    = 32;
     let state_dim:   int    = 4;
     let tape_width:  int    = 8;
-    let epochs:      int    = 80000;
-    let lr:          double = 0.5;
+    let epochs:      int    = 20000;
+    let lr:          double = 0.3;
 
-    let hidden:    TapeLayer = tape::init_tape_layer(INPUT_SIZE,   hidden_size, state_dim, tape_width);
-    let hidden_2:  TapeLayer = tape::init_tape_layer(hidden_size,  hidden_size, state_dim, tape_width);
-    let output_tl: TapeLayer = tape::init_tape_layer(hidden_size,  1,           state_dim, tape_width);
-
-    defer {
-        tape::free_tape_layer(&hidden);
-        tape::free_tape_layer(&hidden_2);
-        tape::free_tape_layer(&output_tl);
-    }
+    let buffer: Arena = arena::create_arena();
+    let hidden:    TapeLayer = tape::init_tape_layer(INPUT_SIZE,   hidden_size, state_dim, tape_width, &buffer);
+    let hidden_2:  TapeLayer = tape::init_tape_layer(hidden_size,  hidden_size, state_dim, tape_width, &buffer);
+    let output_tl: TapeLayer = tape::init_tape_layer(hidden_size,  1,           state_dim, tape_width, &buffer);
+    defer { arena::free_arena(&buffer); }
 
     hidden.layer.init_weights_biases();
     hidden_2.layer.init_weights_biases();
@@ -232,7 +224,7 @@ pub const test_seq_memory -> fn () void {
             output_tl.reset();
         }
 
-        if (epoch % 500 == 0) {
+        if (epoch % 100 == 0) {
             let seq: *double = &seqs[0];
             let loss: double = eval_seq_loss(&hidden, &hidden_2, &output_tl, seq);
 
@@ -253,10 +245,6 @@ pub const test_seq_memory -> fn () void {
                     step, val, target, pred,
                     epoch, epochs, loss, prev_loss
                 );
-                // time::usleep(80);
-
-                tape::run_tape_backward(&output_tl, &t[0]);
-                tape::run_tape_update(&hidden, 0.0);
             }
 
             prev_loss = loss;
