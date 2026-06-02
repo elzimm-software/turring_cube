@@ -49,7 +49,7 @@ const train_gate -> fn (
     let buffer: Arena = arena::create_arena();
     let hidden:       Layer = layer::init_layer(&buffer, input_size, hidden_size);
     let output_layer: Layer = layer::init_layer(&buffer, hidden_size, output_size);
-    defer { layer::free_layer(&hidden);  arena::free_arena(&buffer); }
+    defer { arena::free_arena(&buffer); }
 
     hidden.init_weights_biases();
     output_layer.init_weights_biases();
@@ -77,7 +77,7 @@ const test_gate -> fn (
     let buffer: Arena = arena::create_arena();
     let hidden:       Layer = layer::init_layer(&buffer, input_size, hidden_size);
     let output_layer: Layer = layer::init_layer(&buffer, hidden_size, output_size);
-    defer { layer::free_layer(&hidden);  arena::free_arena(&buffer); }
+    defer { arena::free_arena(&buffer); }
 
     hidden.next = &output_layer;
     layer::link_layers(&hidden);
@@ -141,7 +141,6 @@ pub const gate_run -> fn () void {
         loop [g: int = 0](g < 5) : (++g) {
             let h: Layer = layer::init_layer(&buffer, input_size, hidden_size);
             let o: Layer = layer::init_layer(&buffer, hidden_size, output_size);
-            defer { layer::free_layer(&h); }
 
             h.next = &o;
             layer::link_layers(&h);
@@ -194,8 +193,6 @@ pub const hidden_size_run -> fn () void {
         loop [t: int = 0](t < trials) : (++t) {
             let hidden: Layer       = layer::init_layer(&buffer, 2, hidden_size);
             let output_layer: Layer = layer::init_layer(&buffer, hidden_size, 1);
-            // defer { layer::free_layer(&hidden); } --- IGNORE (Because the arena will free it) ---
-
             
             hidden.init_weights_biases();
             output_layer.init_weights_biases();

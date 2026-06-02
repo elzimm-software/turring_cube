@@ -171,9 +171,9 @@ const print_recall_table -> fn (
 
 pub const test_seq_memory -> fn () void {
     let hidden_size: int    = 32;
-    let state_dim:   int    = 4;
+    let state_dim:   int    = 10;
     let tape_width:  int    = 8;
-    let epochs:      int    = 20000;
+    let epochs:      int    = 80000;
     let lr:          double = 0.3;
 
     let buffer: Arena = arena::create_arena();
@@ -219,9 +219,9 @@ pub const test_seq_memory -> fn () void {
                 o_trail.push(output_tl.tape.head_x, output_tl.tape.head_y);
             }
 
-            hidden.reset();
-            hidden_2.reset();
-            output_tl.reset();
+            // hidden.reset();
+            // hidden_2.reset();
+            // output_tl.reset();
         }
 
         if (epoch % 100 == 0) {
@@ -248,9 +248,9 @@ pub const test_seq_memory -> fn () void {
             }
 
             prev_loss = loss;
-            hidden.reset();
-            hidden_2.reset();
-            output_tl.reset();
+            // hidden.reset();
+            // hidden_2.reset();
+            // output_tl.reset();
         }
     }
 

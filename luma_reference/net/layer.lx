@@ -154,19 +154,6 @@ pub const iter_init -> fn (l: *Layer) LayerIterable {
     };
 }
 
-#takes_ownership
-pub const free_layer -> fn (l: *Layer) void {
-    free(l.weights);
-    free(l.biases);
-    free(l.z);
-    free(l.outputs);
-    free(l.deltas);
-    free(l.grad_w);
-
-    if (l.next != cast<*Layer>(0))
-        free_layer(l.next);
-}
-
 pub const run_forward -> fn (head: *Layer, inputs: *double) void {
     let it: LayerIterable = iter_init(head);
     let current: *double = inputs;

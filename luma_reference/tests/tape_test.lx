@@ -6,13 +6,13 @@
  * I have time to work on the tape implementation again. 
 */
 
-// @use "std_libc" as libc
-// @use "std_time" as time
+@use "std_libc" as libc
+@use "std_time" as time
 
-// @use "layer"    as layer
-// @use "tape"     as tape
-// @use "viz"      as viz
-// @use "unit_test" as test
+@use "layer"    as layer
+@use "tape"     as tape
+@use "viz"      as viz
+@use "unit_test" as test
 
 // const train_tape_gate -> fn (
 //     gate_inputs: [[double; 2]; 4], 

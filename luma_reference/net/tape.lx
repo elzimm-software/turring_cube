@@ -358,14 +358,6 @@ pub const init_tape_layer -> fn (
     };
 }
 
-pub const free_tape_layer -> fn (tl: *TapeLayer) void {
-    layer::free_layer(&tl.layer);
-    free_tape(&tl.tape);
-    free(tl.state);
-    free(tl.input_grads);
-    free(tl.saved_aug);
-}
-
 pub const link_tape_layers -> fn (head: *TapeLayer) void {
     let current: *TapeLayer = head;
     loop (current != cast<*TapeLayer>(0)) {
